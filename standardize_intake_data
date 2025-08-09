@@ -1,0 +1,165 @@
+
+function syncNormalizedIdentifiers() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceSheet = ss.getSheetByName("Intake Request");
+  const targetSheet = ss.getSheetByName("Single User Holds");
+
+  if (!sourceSheet || !targetSheet) throw new Error("Sheets not found.");
+
+  const sourceData = sourceSheet.getDataRange().getValues();
+  const sourceHeaders = sourceData[0];
+
+  const targetData = targetSheet.getDataRange().getValues();
+  const targetHeaders = targetData[0];
+
+  const idCols = ["Email", "Phone Number", "Nickname", "Handle"];
+  const idColIndexes = idCols.map(col => sourceHeaders.indexOf(col));
+
+  const metadataCols = [
+    "Requester Email",
+    "Requester",
+    "Case #",
+    "LAP #",
+    "Legal POC",
+    "Type of Hold",
+    "Name"
+  ];
+  const metadataIndexes = metadataCols.map(col => sourceHeaders.indexOf(col));
+
+  const tgtIdIndex = targetHeaders.indexOf("Account Identifier");
+  const tgtTypeIndex = targetHeaders.indexOf("Identifier Type");
+  const tgtCaseIndex = targetHeaders.indexOf("Case #");
+  const tgtTypeOfHoldIndex = targetHeaders.indexOf("Type of Hold"); // <-- target sheet column for dropdown
+
+  // Build map from target: key = case#||identifier → row index
+  const targetMap = new Map();
+  for (let i = 1; i < targetData.length; i++) {
+    const row = targetData[i];
+    const id = row[tgtIdIndex]?.toString().trim();
+    const caseNum = row[tgtCaseIndex]?.toString().trim();
+    if (id && caseNum) {
+      targetMap.set(`${caseNum}||${id}`, i);
+    }
+  }
+
+  const updates = [];
+  const newRows = [];
+
+  for (let i = 1; i < sourceData.length; i++) {
+    const row = sourceData[i];
+    const metadata = metadataIndexes.map(idx => row[idx]);
+    const caseNum = row[sourceHeaders.indexOf("Case #")];
+
+    idColIndexes.forEach((colIdx, idTypeIdx) => {
+      const idVal = row[colIdx];
+      const idType = idCols[idTypeIdx];
+
+      if (!idVal) return;
+
+      const identifiers = idVal.toString().split(',').map(s => s.trim()).filter(Boolean);
+
+      identifiers.forEach(identifier => {
+        const key = `${caseNum}||${identifier}`;
+
+        const outputRow = [...metadata, identifier, idType];
+
+        if (targetMap.has(key)) {
+          const tRowIndex = targetMap.get(key);
+          const existingRow = targetData[tRowIndex];
+
+          const matches = metadataCols.every((col, j) => {
+            const tgtIdx = targetHeaders.indexOf(col);
+            return (existingRow[tgtIdx] ?? "").toString().trim() === (metadata[j] ?? "").toString().trim();
+          }) && (existingRow[tgtIdIndex] ?? "").toString().trim() === identifier && (existingRow[tgtTypeIndex] ?? "").toString().trim() === idType;
+
+          if (!matches) {
+            outputRow.forEach((val, j) => {
+              const tgtHeader = [...metadataCols, "Account Identifier", "Identifier Type"][j];
+              const tgtColIndex = targetHeaders.indexOf(tgtHeader);
+            if (tgtColIndex !== -1) {
+              targetSheet.getRange(tRowIndex + 1, tgtColIndex + 1).setValue(val);
+            }
+          });
+
+          }
+        } else {
+          newRows.push(outputRow);
+        }
+      });
+    });
+  }
+
+  if (newRows.length > 0) {
+    // Find the first empty row based on Account Identifier column
+    const firstEmptyRow = findFirstEmptyRow(targetSheet, tgtIdIndex + 1);
+
+    targetSheet.getRange(firstEmptyRow, 1, newRows.length, newRows[0].length).setValues(newRows);
+  }
+
+  // --- Add data validation dropdown to "Type of Hold" column ---
+  if (tgtTypeOfHoldIndex !== -1) {
+    applyAccountStatusDropdown(targetSheet, "Account Status", [
+      "Not Active",
+      "No Account"
+    ]);
+
+    applyDuplicateCheckbox(targetSheet, "Duplicate");
+    applyJurisdictionDropdown(targetSheet);
+  }
+}
+
+// Helper to find first empty row based on a column
+function findFirstEmptyRow(sheet, col) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 2; // Only header exists, so first empty row is 2
+
+  const values = sheet.getRange(2, col, lastRow - 1).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (!values[i][0] || values[i][0].toString().trim() === '') {
+      return i + 2;
+    }
+  }
+  return lastRow + 1;
+}
+
+function applyAccountStatusDropdown(sheet, headerName, options) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const colIndex = headers.indexOf(headerName);
+
+  if (colIndex !== -1) {
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(options)
+      .setAllowInvalid(false)
+      .build();
+    const range = sheet.getRange(2, colIndex + 1, sheet.getMaxRows() - 1, 1);
+    range.setDataValidation(rule);
+  }
+}
+
+function applyDuplicateCheckbox(sheet, headerName) {
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const colIndex = headers.indexOf(headerName);
+
+  if (colIndex !== -1) {
+    const rule = SpreadsheetApp.newDataValidation().requireCheckbox().build();
+    const range = sheet.getRange(2, colIndex + 1, sheet.getMaxRows() - 1, 1);
+    range.setDataValidation(rule);
+  }
+}
+
+function applyJurisdictionDropdown(sheet) {
+  const headerName = "Jurisdiction";
+  const jurisdictions = ["US Account", "Non US"]; // Customize list here if needed
+
+  const headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const colIndex = headers.indexOf(headerName);
+
+  if (colIndex !== -1) {
+    const rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(jurisdictions)
+      .setAllowInvalid(false)
+      .build();
+    const range = sheet.getRange(2, colIndex + 1, sheet.getMaxRows() - 1, 1);
+    range.setDataValidation(rule);
+  }
+}
